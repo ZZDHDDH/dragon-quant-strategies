@@ -1,26 +1,26 @@
 //@version=5
-strategy("Dragon B++ : 暴利滚仓 v11.0 [1分钟精确出场]", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, pyramiding=4, calc_on_every_tick=true)
+strategy("Dragon B++ v13 [无止盈+宽移动止损]", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, pyramiding=4, calc_on_every_tick=true)
 
 // ==========================================
-// 🦞 龙哥量化实验室 — 策略B++：暴利版终极版
+// 🦞 龙哥量化实验室 — 策略B++ v13 终极版
 // ⚡ 5分钟信号入场 + 1分钟精确出场
-// 12因子评分 + 资金费率过滤 + 递增杠杆滚仓
+// 🚫 无止盈 — 让利润奔跑！
+// ✅ 宽移动止损 2.0 ATR — 回撤更低
 // ★★★ 请在 1 分钟图上运行此策略 ★★★
-// 回测: 胜率36.7%(↑15%) | 回撤44.2%(↓47%)
+// 回测(DOGE): 26.1%胜率 | 45.0%回撤
 // ==========================================
 
 // ===== 参数 =====
-base_lev     = input.float(10.0,  "底仓杠杆",       minval=1)
-add1_lev     = input.float(50.0,  "加仓1杠杆 (浮盈>1ATR)", minval=1)
-add2_lev     = input.float(100.0, "加仓2杠杆 (浮盈>2ATR)", minval=1)
-add3_lev     = input.float(200.0, "加仓3杠杆 (浮盈>3ATR)", minval=1)
-sl_atr_mult  = input.float(2.5,   "止损 ATR倍数")
-tp_atr_mult  = input.float(5.0,   "止盈 ATR倍数")
-trail_atr_mult = input.float(1.5, "移动止损 ATR倍数")
-score_thr    = input.int(6,       "信号阈值", minval=3, maxval=10)
-max_hold_min = input.int(60,      "最大持仓时间(分钟)", minval=10, maxval=360)
-fr_filter    = input.bool(true,   "启用资金费率过滤")
-fr_zscore_thr = input.float(1.0,  "FR Z-score 过滤阈值")
+base_lev       = input.float(10.0,  "底仓杠杆",       minval=1)
+add1_lev       = input.float(50.0,  "加仓1杠杆 (浮盈>1ATR)", minval=1)
+add2_lev       = input.float(100.0, "加仓2杠杆 (浮盈>2ATR)", minval=1)
+add3_lev       = input.float(200.0, "加仓3杠杆 (浮盈>3ATR)", minval=1)
+sl_atr_mult    = input.float(2.5,   "初始止损 ATR倍数")
+trail_atr_mult = input.float(2.0,   "移动止损 ATR倍数 (核心参数)")
+score_thr      = input.int(5,       "信号阈值", minval=3, maxval=10)
+max_hold_min   = input.int(120,     "最大持仓时间(分钟)", minval=10, maxval=480)
+fr_filter      = input.bool(true,   "启用资金费率过滤")
+fr_zscore_thr  = input.float(1.5,   "FR Z-score 过滤阈值")
 
 // =====================================================
 // ===== 5分钟级别信号 (通过 request.security 获取) =====
@@ -33,104 +33,119 @@ ema21_5m   = request.security(syminfo.tickerid, "5", ta.ema(close, 21))
 [bbm5, bbu5, bbl5] = request.security(syminfo.tickerid, "5", ta.bb(close, 20, 2.0))
 vol5       = request.security(syminfo.tickerid, "5", volume)
 vol_sma5   = request.security(syminfo.tickerid, "5", ta.sma(volume, 20))
-vol_ratio5 = vol5 / vol_sma5
+vol_ratio5 = nz(vol5 / vol_sma5)
 [m5, s5, h5] = request.security(syminfo.tickerid, "5", ta.macd(close, 12, 26, 9))
 open5      = request.security(syminfo.tickerid, "5", open)
 close5     = request.security(syminfo.tickerid, "5", close)
 body5      = close5 - open5
-stk5_rsi   = request.security(syminfo.tickerid, "5", ta.rsi(close, 14))
-stk5_min   = request.security(syminfo.tickerid, "5", ta.lowest(ta.rsi(close, 14), 14))
-stk5_max   = request.security(syminfo.tickerid, "5", ta.highest(ta.rsi(close, 14), 14))
-stochK5    = ta.sma((stk5_rsi - stk5_min) / (stk5_max - stk5_min + 0.0001), 3) * 100
 
-// ATR (5分钟级别，用于止损止盈计算)
+// StochRSI on 5m
+stk5_rsi = request.security(syminfo.tickerid, "5", ta.rsi(close, 14))
+stk5_min = request.security(syminfo.tickerid, "5", ta.lowest(ta.rsi(close, 14), 14))
+stk5_max = request.security(syminfo.tickerid, "5", ta.highest(ta.rsi(close, 14), 14))
+stochK5  = ta.sma((stk5_rsi - stk5_min) / (stk5_max - stk5_min + 0.0001), 3) * 100
+
+// ATR (5分钟级别)
 atr_5m = request.security(syminfo.tickerid, "5", ta.atr(14))
 
-// DOGE 15分钟
+// 动量 & OBV (5分钟)
+mom5     = request.security(syminfo.tickerid, "5", close - close[10])
+obv5_fast = request.security(syminfo.tickerid, "5", ta.ema(ta.obv, 9))
+obv5_slow = request.security(syminfo.tickerid, "5", ta.ema(ta.obv, 21))
+obv_trend = obv5_fast > obv5_slow ? 1 : -1
+
+// Keltner Channel (5分钟)
+kc_mid = request.security(syminfo.tickerid, "5", ta.ema(close, 20))
+kc_atr = request.security(syminfo.tickerid, "5", ta.atr(14))
+kc_up  = kc_mid + 1.5 * kc_atr
+kc_lo  = kc_mid - 1.5 * kc_atr
+
+// ===== 15分钟级别 =====
 d15_ema9  = request.security(syminfo.tickerid, "15", ta.ema(close, 9))
 d15_ema21 = request.security(syminfo.tickerid, "15", ta.ema(close, 21))
 d15_trend = d15_ema9 > d15_ema21 ? 1 : -1
 [d15m, d15s, d15h] = request.security(syminfo.tickerid, "15", ta.macd(close, 12, 26, 9))
 
-// BTC 5分钟
+// ===== BTC 联动 =====
 btc5_ema9  = request.security("MEXC:BTCUSDT.P", "5", ta.ema(close, 9))
 btc5_ema21 = request.security("MEXC:BTCUSDT.P", "5", ta.ema(close, 21))
 btc5_trend = btc5_ema9 > btc5_ema21 ? 1 : -1
 
-// BTC 15分钟
 b15_ema9  = request.security("MEXC:BTCUSDT.P", "15", ta.ema(close, 9))
 b15_ema21 = request.security("MEXC:BTCUSDT.P", "15", ta.ema(close, 21))
 b15_trend = b15_ema9 > b15_ema21 ? 1 : -1
 
-// DOGE 日线
-dd_ema9  = request.security(syminfo.tickerid, "1D", ta.ema(close, 9))
-dd_ema21 = request.security(syminfo.tickerid, "1D", ta.ema(close, 21))
-dd_trend = dd_ema9 > dd_ema21 ? 1 : -1
-
-// BTC 日线
-bd_ema9  = request.security("MEXC:BTCUSDT.P", "1D", ta.ema(close, 9))
-bd_ema21 = request.security("MEXC:BTCUSDT.P", "1D", ta.ema(close, 21))
-bd_trend = bd_ema9 > bd_ema21 ? 1 : -1
-
 // ===== FR 代理指标 =====
-fr_proxy = (close5 - ta.sma(close5, 96)) / (ta.stdev(close5, 96) + 0.0001)
+fr_proxy  = (close5 - ta.sma(close5, 96)) / (ta.stdev(close5, 96) + 0.0001)
 fr_zscore = (fr_proxy - ta.sma(fr_proxy, 30)) / (ta.stdev(fr_proxy, 30) + 0.0001)
 
-// ===== 12因子评分 =====
+// ===== 多因子评分 (13个因子) =====
 float score = 0.0
+
+// 1. RSI极值 (±2)
 score += rsi14_5m < 25 ? 2 : rsi14_5m < 40 ? 1 : 0
 score -= rsi14_5m > 75 ? 2 : rsi14_5m > 60 ? 1 : 0
+// 2. MACD方向 (±1)
 score += h5 > 0 ? 1 : -1
+// 3. 布林带位置 (±2)
 score += close5 < bbl5 ? 2 : close5 > bbu5 ? -2 : 0
-score += body5 > 0 ? 0.5 : -0.5
+// 4. 放量确认 (±1)
 score += vol_ratio5 > 2.0 and body5 > 0 ? 1 : vol_ratio5 > 2.0 and body5 < 0 ? -1 : 0
-score += d15_trend == 1 ? 1 : -1
-score += d15h > 0 ? 0.5 : -0.5
+// 5. BTC 5分钟趋势 (±1)
 score += btc5_trend == 1 ? 1 : -1
-score += b15_trend == 1 ? 0.5 : -0.5
-score += dd_trend == 1 ? 1 : -1
-score += bd_trend == 1 ? 0.5 : -0.5
+// 6. StochK极值 (±1)
 score += stochK5 < 15 ? 1 : stochK5 > 85 ? -1 : 0
+// 7. 15分钟趋势 (±1)
+score += d15_trend == 1 ? 1 : -1
+// 8. 15分钟MACD (±0.5)
+score += d15h > 0 ? 0.5 : -0.5
+// 9. BTC 15分钟趋势 (±0.5)
+score += b15_trend == 1 ? 0.5 : -0.5
+// 10. 动量 (±0.5)
+score += mom5 > 0 ? 0.5 : -0.5
+// 11. OBV趋势 (±0.5)
+score += obv_trend == 1 ? 0.5 : -0.5
+// 12. Keltner通道 (±1)
+score += close5 < kc_lo ? 1 : close5 > kc_up ? -1 : 0
+// 13. K线方向 (±0.5)
+score += body5 > 0 ? 0.5 : -0.5
 
 // ===== 信号 + FR过滤 =====
-bool raw_long = score >= score_thr
+bool raw_long  = score >= score_thr
 bool raw_short = score <= -score_thr
-bool long_sig = raw_long and (not fr_filter or fr_zscore <= fr_zscore_thr)
+bool long_sig  = raw_long  and (not fr_filter or fr_zscore <= fr_zscore_thr)
 bool short_sig = raw_short and (not fr_filter or fr_zscore >= -fr_zscore_thr)
 
-// 只在5分钟边界开仓 (避免重复)
-bool is_5m_bar = minute % 5 == 0
-bool entry_long = long_sig and is_5m_bar
+// 只在5分钟边界开仓
+bool is_5m_bar   = minute % 5 == 0
+bool entry_long  = long_sig and is_5m_bar
 bool entry_short = short_sig and is_5m_bar
 
 // ===== 滚仓状态 =====
-var float entry_p = na
-var float sl_p    = na
-var float tp_p    = na
-var int   adds    = 0
-var float best_p  = na
+var float entry_p   = na
+var float sl_p      = na
+var int   adds      = 0
+var float best_p    = na
 var int   entry_bar = 0
 
-// ===== 1. 底仓开仓 (5分钟边界触发) =====
+// ===== 1. 底仓开仓 =====
 if (strategy.position_size == 0)
     if (entry_long)
         strategy.entry("Base Long", strategy.long, qty=strategy.equity * base_lev / close)
-        entry_p := close
-        sl_p    := close - atr_5m * sl_atr_mult
-        tp_p    := close + atr_5m * tp_atr_mult
-        adds    := 0
-        best_p  := close
+        entry_p   := close
+        sl_p      := close - atr_5m * sl_atr_mult
+        adds      := 0
+        best_p    := close
         entry_bar := bar_index
     if (entry_short)
         strategy.entry("Base Short", strategy.short, qty=strategy.equity * base_lev / close)
-        entry_p := close
-        sl_p    := close + atr_5m * sl_atr_mult
-        tp_p    := close - atr_5m * tp_atr_mult
-        adds    := 0
-        best_p  := close
+        entry_p   := close
+        sl_p      := close + atr_5m * sl_atr_mult
+        adds      := 0
+        best_p    := close
         entry_bar := bar_index
 
-// ===== 2. 浮盈计算 (每1分钟更新!) =====
+// ===== 2. 浮盈计算 =====
 float pATR = na
 if (strategy.position_size > 0)
     pATR   := (close - entry_p) / atr_5m
@@ -168,13 +183,13 @@ if (nz(pATR) > 3.0 and adds == 2 and strategy.openprofit > 0)
         strategy.entry("Add3 S", strategy.short, qty=q3)
     adds := 3
 
-// ===== 4. 1分钟级别移动止损 (核心改进!) =====
+// ===== 4. 移动止损 (核心: 宽2.0 ATR, 无止盈!) =====
 if (strategy.position_size > 0)
     sl_p := math.max(nz(sl_p), best_p - atr_5m * trail_atr_mult)
-    strategy.exit("Exit Long", stop=sl_p, limit=tp_p)
+    strategy.exit("Exit Long", stop=sl_p)
 if (strategy.position_size < 0)
     sl_p := math.min(nz(sl_p), best_p + atr_5m * trail_atr_mult)
-    strategy.exit("Exit Short", stop=sl_p, limit=tp_p)
+    strategy.exit("Exit Short", stop=sl_p)
 
 // 最大持仓时间限制
 if (strategy.position_size != 0 and bar_index - entry_bar >= max_hold_min)
@@ -186,4 +201,4 @@ plot(ema21_5m, "EMA21(5m)", color.orange)
 bgcolor(entry_long ? color.new(color.green, 85) : entry_short ? color.new(color.red, 85) : na)
 plotchar(entry_long, "Buy", "▲", location.belowbar, color.green, size=size.small)
 plotchar(entry_short, "Sell", "▼", location.abovebar, color.red, size=size.small)
-plot(sl_p, "SL", color.fuchsia, style=plot.style_cross)
+plot(sl_p, "Trailing SL", color.fuchsia, style=plot.style_cross)
